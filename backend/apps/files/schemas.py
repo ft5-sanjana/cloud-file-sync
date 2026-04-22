@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import List, Literal
 from uuid import UUID
 
 from ninja import Schema
@@ -28,6 +29,28 @@ class FileOut(Schema):
             created_at=instance.created_at,
             updated_at=instance.updated_at,
         )
+
+
+class FileListOut(Schema):
+    items: List[FileOut]
+    total: int
+    page: int
+    page_size: int
+
+
+SignedUrlMode = Literal["preview", "download"]
+
+
+class SignedUrlOut(Schema):
+    url: str
+    expires_at: datetime
+    mode: SignedUrlMode
+
+
+class StorageUsageOut(Schema):
+    used: int
+    quota: int
+    file_count: int
 
 
 class ErrorOut(Schema):

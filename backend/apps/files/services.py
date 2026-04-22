@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import io
 import logging
+from datetime import timedelta
+from typing import Literal
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Sum
@@ -125,6 +128,17 @@ def upload_file(user, upload: UploadedFile) -> File:
 
     # ── Phase 4: atomic swap (short TX) ────────────────────────────
     with transaction.atomic():
+        # Re-fetch our row under lock. If the user DELETEd it while phase 3
+        # was streaming, it's now in DELETING — let the delete task clean up.
+        locked_new = File.objects.select_for_update().get(pk=file_row.pk)
+        if locked_new.status != File.Status.UPLOADING:
+            logger.info(
+                "upload_file: row %s changed status to %s during upload; skipping swap",
+                file_row.pk, locked_new.status,
+            )
+            file_row.refresh_from_db()
+            return file_row
+
         existing_qs = (
             File.objects.select_for_update()
             .filter(owner=user, name=display_name, status=File.Status.READY)
@@ -135,13 +149,13 @@ def upload_file(user, upload: UploadedFile) -> File:
             existing.status = File.Status.DELETING
             existing.save(update_fields=["status", "updated_at"])
 
-        file_row.status = File.Status.READY
-        file_row.save(update_fields=["status", "updated_at"])
+        locked_new.status = File.Status.READY
+        locked_new.save(update_fields=["status", "updated_at"])
 
         AuditLog.objects.create(
             user=user,
             action=(AuditLog.Action.OVERWRITE if existing else AuditLog.Action.UPLOAD),
-            file_id=file_row.id,
+            file_id=locked_new.id,
             file_name=display_name,
             metadata={"size": stored_size, "mime": canonical_mime},
         )
@@ -156,3 +170,84 @@ def upload_file(user, upload: UploadedFile) -> File:
 
     file_row.refresh_from_db()
     return file_row
+
+
+# ── Delete ────────────────────────────────────────────────────────
+def delete_file(user, file_row: File) -> None:
+    """Soft-flag the row to DELETING and enqueue a Celery task to finish the job.
+
+    Caller is responsible for having fetched `file_row` with the owner filter
+    already applied (see apps/files/selectors.py).
+
+    Idempotent: calling on a row already in DELETING is a no-op.
+    """
+    # Deferred import — avoids circular (tasks imports services indirectly).
+    from . import tasks
+
+    if file_row.status == File.Status.DELETING:
+        return
+
+    with transaction.atomic():
+        locked = File.objects.select_for_update().get(pk=file_row.pk)
+        if locked.status == File.Status.DELETING:
+            return
+        prior_status = locked.status
+        locked.status = File.Status.DELETING
+        locked.save(update_fields=["status", "updated_at"])
+
+        AuditLog.objects.create(
+            user=user,
+            action=AuditLog.Action.DELETE,
+            file_id=locked.id,
+            file_name=locked.name,
+            metadata={"prior_status": prior_status, "storage_key": locked.storage_key},
+        )
+
+        # Delay the B2 delete if upload was still in flight — gives the PUT time
+        # to either land (so we can remove the object) or fail cleanly. Without
+        # this, the delete call might arrive before the upload, orphaning bytes.
+        storage_key = locked.storage_key
+        pk_str = str(locked.id)
+        countdown = 30 if prior_status == File.Status.UPLOADING else 0
+
+        # Dispatch AFTER commit so the worker doesn't race the transaction.
+        transaction.on_commit(
+            lambda: tasks.delete_storage_object.apply_async(
+                args=[storage_key, pk_str], countdown=countdown
+            )
+        )
+
+
+# ── Signed URL issuance ───────────────────────────────────────────
+def issue_signed_url(
+    user,
+    file_row: File,
+    *,
+    mode: Literal["preview", "download"],
+) -> dict:
+    """Return {url, expires_at, mode}. Logs the issuance for audit."""
+    ttl = settings.SIGNED_URL_TTL_SECONDS
+    disposition = "inline" if mode == "preview" else "attachment"
+
+    url = storage_service.presign_get(
+        file_row.storage_key,
+        ttl_seconds=ttl,
+        disposition=disposition,
+        filename=file_row.name,
+    )
+
+    AuditLog.objects.create(
+        user=user,
+        action=(
+            AuditLog.Action.PREVIEW if mode == "preview" else AuditLog.Action.DOWNLOAD
+        ),
+        file_id=file_row.id,
+        file_name=file_row.name,
+        metadata={"ttl": ttl},
+    )
+
+    return {
+        "url": url,
+        "expires_at": timezone.now() + timedelta(seconds=ttl),
+        "mode": mode,
+    }
