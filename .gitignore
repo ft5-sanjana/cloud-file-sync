@@ -21,6 +21,10 @@ htmlcov/
 /backend/media/
 /backend/db.sqlite3
 
+# Celery
+/backend/celerybeat-schedule
+/backend/celerybeat-schedule.*
+
 # Node / Next.js
 node_modules/
 .next/

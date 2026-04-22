@@ -30,7 +30,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: >
-      sh -c "python manage.py makemigrations accounts --noinput &&
+      sh -c "python manage.py makemigrations accounts files --noinput &&
              python manage.py migrate --noinput &&
              python manage.py runserver 0.0.0.0:8000"
     env_file:
@@ -50,6 +50,21 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: celery -A config worker --loglevel=info
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A config beat --loglevel=info
     env_file:
       - .env
     volumes:

@@ -34,8 +34,8 @@ THIRD_PARTY_APPS = [
 LOCAL_APPS = [
     "apps.common",
     "apps.accounts",
-    # "apps.files",
-    # "apps.storage",
+    "apps.storage",
+    "apps.files",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
@@ -158,6 +158,17 @@ CELERY_TASK_REJECT_ON_WORKER_LOST = True
 CELERY_TASK_TIME_LIMIT = 15 * 60
 CELERY_TASK_SOFT_TIME_LIMIT = 10 * 60
 CELERY_RESULT_EXPIRES = 60 * 60  # 1h
+
+CELERY_BEAT_SCHEDULE = {
+    "cleanup-failed-uploads": {
+        "task": "apps.files.tasks.cleanup_failed_uploads",
+        "schedule": 15 * 60,  # every 15 minutes
+    },
+    "reap-deleting": {
+        "task": "apps.files.tasks.reap_deleting",
+        "schedule": 30 * 60,  # every 30 minutes
+    },
+}
 
 # ── Logging ───────────────────────────────────────────────────
 LOGGING = {
