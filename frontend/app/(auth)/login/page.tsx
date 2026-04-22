@@ -27,7 +27,9 @@ export default function LoginPage() {
     mutationFn: authApi.login,
     onSuccess: (data) => {
       setSession(data.access, data.user);
-      toast.success(`Welcome back, ${data.user.name}`);
+      toast.success(
+        `Welcome back, ${data.user.first_name || data.user.email}`,
+      );
       router.replace("/dashboard");
     },
     onError: (error: unknown) => {

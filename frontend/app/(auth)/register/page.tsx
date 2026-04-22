@@ -14,12 +14,21 @@ import { authApi } from "@/features/auth/api";
 import { registerSchema } from "@/features/auth/schemas";
 import { ApiError } from "@/lib/api";
 
+type FieldKey =
+  | "first_name"
+  | "last_name"
+  | "email"
+  | "password"
+  | "confirm_password";
+
 export default function RegisterPage() {
   const router = useRouter();
-  const [name, setName] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [errors, setErrors] = useState<{ name?: string; email?: string; password?: string }>({});
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [errors, setErrors] = useState<Partial<Record<FieldKey, string>>>({});
 
   const mutation = useMutation({
     mutationFn: authApi.register,
@@ -46,11 +55,17 @@ export default function RegisterPage() {
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const parsed = registerSchema.safeParse({ name, email, password });
+    const parsed = registerSchema.safeParse({
+      first_name: firstName,
+      last_name: lastName,
+      email,
+      password,
+      confirm_password: confirmPassword,
+    });
     if (!parsed.success) {
-      const fieldErrors: typeof errors = {};
+      const fieldErrors: Partial<Record<FieldKey, string>> = {};
       for (const issue of parsed.error.issues) {
-        const key = issue.path[0] as "name" | "email" | "password";
+        const key = issue.path[0] as FieldKey | undefined;
         if (key) fieldErrors[key] = issue.message;
       }
       setErrors(fieldErrors);
@@ -68,17 +83,30 @@ export default function RegisterPage() {
       </CardHeader>
       <form onSubmit={onSubmit} noValidate>
         <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="name">Name</Label>
-            <Input
-              id="name"
-              autoComplete="name"
-              required
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              aria-invalid={Boolean(errors.name)}
-            />
-            {errors.name && <p className="text-xs text-red-600">{errors.name}</p>}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label htmlFor="first_name">First name</Label>
+              <Input
+                id="first_name"
+                autoComplete="given-name"
+                required
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                aria-invalid={Boolean(errors.first_name)}
+              />
+              {errors.first_name && <p className="text-xs text-red-600">{errors.first_name}</p>}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="last_name">Last name</Label>
+              <Input
+                id="last_name"
+                autoComplete="family-name"
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                aria-invalid={Boolean(errors.last_name)}
+              />
+              {errors.last_name && <p className="text-xs text-red-600">{errors.last_name}</p>}
+            </div>
           </div>
           <div className="space-y-2">
             <Label htmlFor="email">Email</Label>
@@ -106,6 +134,21 @@ export default function RegisterPage() {
             />
             {errors.password && <p className="text-xs text-red-600">{errors.password}</p>}
             <p className="text-xs text-neutral-500">Minimum 8 characters.</p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="confirm_password">Confirm password</Label>
+            <Input
+              id="confirm_password"
+              type="password"
+              autoComplete="new-password"
+              required
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              aria-invalid={Boolean(errors.confirm_password)}
+            />
+            {errors.confirm_password && (
+              <p className="text-xs text-red-600">{errors.confirm_password}</p>
+            )}
           </div>
         </CardContent>
         <CardFooter className="flex flex-col gap-3">

@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation } from "@tanstack/react-query";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
@@ -44,16 +45,25 @@ export default function DashboardPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Your files</h1>
           <p className="text-sm text-neutral-500">
-            Signed in as <span className="font-medium">{user.email}</span>
+            Signed in as{" "}
+            <span className="font-medium">
+              {[user.first_name, user.last_name].filter(Boolean).join(" ") || user.email}
+            </span>{" "}
+            <span className="text-neutral-400">({user.email})</span>
           </p>
         </div>
-        <Button
-          variant="outline"
-          onClick={() => logoutMutation.mutate()}
-          disabled={logoutMutation.isPending}
-        >
-          {logoutMutation.isPending ? "Signing out…" : "Sign out"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" asChild>
+            <Link href="/profile">Profile</Link>
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => logoutMutation.mutate()}
+            disabled={logoutMutation.isPending}
+          >
+            {logoutMutation.isPending ? "Signing out…" : "Sign out"}
+          </Button>
+        </div>
       </header>
 
       <Card className="mb-6">

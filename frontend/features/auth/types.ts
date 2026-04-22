@@ -1,7 +1,8 @@
 export type User = {
   id: number;
   email: string;
-  name: string;
+  first_name: string;
+  last_name: string;
   storage_quota: number;
   storage_used: number;
   date_joined: string;
@@ -15,5 +16,6 @@ export type TokenResponse = {
 export type RegisterResponse = {
   id: number;
   email: string;
-  name: string;
+  first_name: string;
+  last_name: string;
 };

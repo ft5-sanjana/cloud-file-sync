@@ -12,7 +12,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     """Custom user: email is the login identifier."""
 
     email = models.EmailField(unique=True, db_index=True)
-    name = models.CharField(max_length=150)
+    first_name = models.CharField(max_length=75)
+    last_name = models.CharField(max_length=75, blank=True)
 
     # Per-user storage quota in bytes (configurable per user; default from settings).
     storage_quota = models.BigIntegerField(default=0)
@@ -24,7 +25,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     objects = UserManager()
 
     USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = ["name"]
+    REQUIRED_FIELDS = ["first_name"]
 
     class Meta:
         db_table = "accounts_user"
@@ -33,6 +34,16 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self) -> str:  # pragma: no cover
         return self.email
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.first_name} {self.last_name}".strip()
+
+    def get_full_name(self) -> str:  # Django admin expects this method
+        return self.full_name
+
+    def get_short_name(self) -> str:  # Django admin expects this method
+        return self.first_name
 
     def save(self, *args, **kwargs) -> None:
         # Seed default quota from settings on first save.
