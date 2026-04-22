@@ -1,16 +1,23 @@
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useEffect } from "react";
+
+import { useAuthStore } from "@/features/auth/store";
+
 export default function HomePage() {
+  const router = useRouter();
+  const isInitialized = useAuthStore((s) => s.isInitialized);
+  const user = useAuthStore((s) => s.user);
+
+  useEffect(() => {
+    if (!isInitialized) return;
+    router.replace(user ? "/dashboard" : "/login");
+  }, [isInitialized, user, router]);
+
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
-      <h1 className="text-3xl font-semibold">Cloud File Sync</h1>
-      <p className="text-sm opacity-70">
-        Scaffold is up. Auth & dashboard coming in M1/M4.
-      </p>
-      <a
-        href="/api/health"
-        className="text-sm underline opacity-80 hover:opacity-100"
-      >
-        /api/health
-      </a>
+    <main className="flex min-h-screen items-center justify-center">
+      <div className="text-sm text-neutral-500">Loading…</div>
     </main>
   );
 }

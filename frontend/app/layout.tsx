@@ -1,4 +1,9 @@
 import type { Metadata } from "next";
+import { Toaster } from "sonner";
+
+import { AuthProvider } from "@/providers/auth-provider";
+import { QueryProvider } from "@/providers/query-provider";
+
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -13,7 +18,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <QueryProvider>
+          <AuthProvider>{children}</AuthProvider>
+          <Toaster position="top-right" richColors closeButton />
+        </QueryProvider>
+      </body>
     </html>
   );
 }
