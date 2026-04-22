@@ -10,8 +10,9 @@ import logging
 from typing import Optional
 from uuid import UUID
 
+from django_ratelimit.core import is_ratelimited
 from ninja import File as NinjaFile
-from ninja import Query, Router
+from ninja import Router
 from ninja.files import UploadedFile
 
 from apps.accounts.auth import jwt_auth
@@ -45,11 +46,22 @@ storage_router = Router(tags=["storage"])
         400: ErrorOut,
         409: ErrorOut,
         413: ErrorOut,
+        429: ErrorOut,
         503: ErrorOut,
     },
     auth=jwt_auth,
 )
 def upload(request, file: UploadedFile = NinjaFile(...)):
+    # Per-user cap: 30 uploads/hour. Authenticated → key on user; IP fallback
+    # isn't reached here because jwt_auth rejects unauthenticated callers first.
+    if is_ratelimited(
+        request, group="files:upload", key="user", rate="30/h",
+        method="POST", increment=True,
+    ):
+        return 429, ErrorOut(
+            code="RATE_LIMITED",
+            message="Too many uploads. Please slow down and try again later.",
+        )
     try:
         row = upload_file(request.user, file)
     except FileValidationError as exc:
@@ -118,7 +130,13 @@ def delete_file_endpoint(request, file_id: UUID):
 # ── GET /api/files/{id}/signed-url ──────────────────────────────
 @router.get(
     "/{file_id}/signed-url",
-    response={200: SignedUrlOut, 404: ErrorOut, 409: ErrorOut, 503: ErrorOut},
+    response={
+        200: SignedUrlOut,
+        404: ErrorOut,
+        409: ErrorOut,
+        429: ErrorOut,
+        503: ErrorOut,
+    },
     auth=jwt_auth,
 )
 def get_signed_url(
@@ -126,6 +144,16 @@ def get_signed_url(
     file_id: UUID,
     mode: SignedUrlMode = "download",
 ):
+    # Caps both preview and download traffic at 120/hour per user — enough
+    # for ordinary browsing, tight enough to blunt URL-harvesting abuse.
+    if is_ratelimited(
+        request, group="files:signed-url", key="user", rate="120/h",
+        method="GET", increment=True,
+    ):
+        return 429, ErrorOut(
+            code="RATE_LIMITED",
+            message="Too many link requests. Please try again shortly.",
+        )
     row = get_user_file(request.user, file_id)
     if row is None:
         return 404, ErrorOut(code="NOT_FOUND", message="File not found.")

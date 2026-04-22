@@ -46,6 +46,9 @@ AUTHENTICATION_BACKENDS = [
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 MIDDLEWARE = [
+    # RequestID first so every downstream layer (including SecurityMiddleware
+    # redirects) gets a correlation ID on the response.
+    "apps.common.middleware.RequestIDMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -54,6 +57,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # SecurityHeaders last — only mutates the outgoing response.
+    "apps.common.middleware.SecurityHeadersMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -150,6 +155,17 @@ B2_BUCKET_NAME = env("B2_BUCKET_NAME", default="")
 B2_KEY_ID = env("B2_KEY_ID", default="")
 B2_APPLICATION_KEY = env("B2_APPLICATION_KEY", default="")
 
+# ── Cache ─────────────────────────────────────────────────────
+# Shared cache backend — keeps django-ratelimit counters consistent across
+# gunicorn workers in prod. A separate Redis DB from Celery's broker/backend
+# avoids collisions.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": env("REDIS_CACHE_URL", default="redis://redis:6379/3"),
+    }
+}
+
 # ── Celery ────────────────────────────────────────────────────
 CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://redis:6379/1")
 CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://redis:6379/2")
@@ -174,11 +190,21 @@ CELERY_BEAT_SCHEDULE = {
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "request_id": {"()": "apps.common.middleware.RequestIDLogFilter"},
+    },
     "formatters": {
-        "simple": {"format": "[{asctime}] {levelname} {name}: {message}", "style": "{"},
+        "simple": {
+            "format": "[{asctime}] {levelname} {name} rid={request_id}: {message}",
+            "style": "{",
+        },
     },
     "handlers": {
-        "console": {"class": "logging.StreamHandler", "formatter": "simple"},
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "simple",
+            "filters": ["request_id"],
+        },
     },
     "root": {"handlers": ["console"], "level": "INFO"},
 }
