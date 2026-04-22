@@ -35,7 +35,11 @@ const REFRESH_PATH = "/api/auth/refresh";
 
 let refreshInFlight: Promise<string | null> | null = null;
 
-async function requestRefresh(): Promise<string | null> {
+/**
+ * Single-flight refresh. Exported so callers outside apiFetch (e.g. XHR-based
+ * upload with progress) can participate in the same coalesced refresh.
+ */
+export async function requestRefresh(): Promise<string | null> {
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = (async () => {
     try {
