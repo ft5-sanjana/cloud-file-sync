@@ -43,9 +43,14 @@ def purge_b2_objects(self, storage_keys: list[str], user_email: str) -> None:
         "purge_b2_objects start user=%s count=%s", user_email, len(storage_keys)
     )
 
+    # Version-aware purge: B2 buckets are versioned by default, so a plain
+    # DELETE just writes a delete marker. For a deleted account we want the
+    # bytes truly gone — no retained versions, no tombstones.
+    total_versions = 0
     for key in storage_keys:
-        storage_service.delete_object(key)
+        total_versions += storage_service.delete_all_versions(key)
 
     logger.info(
-        "purge_b2_objects done user=%s count=%s", user_email, len(storage_keys)
+        "purge_b2_objects done user=%s keys=%s versions=%s",
+        user_email, len(storage_keys), total_versions,
     )

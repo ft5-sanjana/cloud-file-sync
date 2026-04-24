@@ -83,7 +83,20 @@ export function useDeleteFile() {
       qc.invalidateQueries({ queryKey: filesKeys.all });
       qc.invalidateQueries({ queryKey: filesKeys.storage() });
     },
-    onError: (err) => toast.error(err.message || "Delete failed"),
+    onError: (err) => {
+      // 409 FILE_BUSY — upload still streaming; user just needs to wait.
+      // 502 STORAGE_PURGE_FAILED — server retries in background, but tell
+      // the user their click didn't fully complete so they can retry.
+      if (err.code === "FILE_BUSY") {
+        toast.error("This file is still uploading. Try again in a moment.");
+      } else if (err.code === "STORAGE_PURGE_FAILED") {
+        toast.error(
+          "Storage cleanup failed. It'll be retried automatically — please try again.",
+        );
+      } else {
+        toast.error(err.message || "Delete failed");
+      }
+    },
   });
 }
 

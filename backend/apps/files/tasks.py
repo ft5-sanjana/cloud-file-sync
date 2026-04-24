@@ -30,14 +30,20 @@ logger = logging.getLogger(__name__)
     max_retries=5,
 )
 def delete_storage_object(self, storage_key: str, file_id: str) -> None:
-    """Delete a B2 object and hard-delete the File row.
+    """Backstop purge: remove every B2 version of `storage_key` and the row.
 
-    Triggered when a file is overwritten (old key cleanup) or explicitly
-    deleted. Missing keys are treated as success.
+    Primary delete/overwrite paths in `services.py` now call
+    `delete_all_versions` inline. This task exists purely as a safety net
+    for rows that got stuck in DELETING — e.g. the API process crashed
+    between the status flip and the sync purge, or the sync purge hit a
+    transient B2 failure. `reap_deleting` schedules us for those rows.
+
+    Idempotent end-to-end: listing + versioned deletion is safe to retry,
+    and a missing row is logged and ignored.
     """
     from .models import AuditLog, File
 
-    storage_service.delete_object(storage_key)
+    purged = storage_service.delete_all_versions(storage_key)
 
     with transaction.atomic():
         try:
@@ -53,7 +59,7 @@ def delete_storage_object(self, storage_key: str, file_id: str) -> None:
             action=AuditLog.Action.DELETE,
             file_id=file_id,
             file_name=name,
-            metadata={"storage_key": storage_key},
+            metadata={"storage_key": storage_key, "versions_purged": purged},
         )
 
 
@@ -109,10 +115,16 @@ def cleanup_failed_uploads(max_age_minutes: int = 60) -> int:
 
     count = 0
     for row in stale:
+        # Use version-aware purge: stuck UPLOADING rows may have partial
+        # multipart writes or a completed PUT that never got swapped to
+        # READY — either way we want the key gone, not just marker-hidden.
         try:
-            storage_service.delete_object(row.storage_key)
+            storage_service.delete_all_versions(row.storage_key)
         except StorageError:
-            logger.warning("cleanup_failed_uploads: storage delete failed key=%s", row.storage_key)
+            logger.warning(
+                "cleanup_failed_uploads: storage purge failed key=%s",
+                row.storage_key,
+            )
         row.delete()
         count += 1
     if count:

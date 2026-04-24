@@ -31,6 +31,18 @@ class MimeMismatchError(FileValidationError):
         )
 
 
+class FileBusyError(Exception):
+    """Raised when a file can't be modified right now (e.g. a DELETE arrives
+    while the upload is still streaming). The client should retry in a
+    moment once the in-flight operation settles. Maps to HTTP 409.
+    """
+
+    def __init__(self, message: str = "File is busy, please retry in a moment.") -> None:
+        super().__init__(message)
+        self.code = "FILE_BUSY"
+        self.message = message
+
+
 class QuotaExceededError(Exception):
     def __init__(self, used: int, quota: int, incoming: int) -> None:
         super().__init__("Storage quota exceeded.")

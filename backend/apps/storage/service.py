@@ -41,7 +41,14 @@ def upload_stream(key: str, fileobj: IO[bytes], content_type: str) -> None:
 
 
 def delete_object(key: str) -> None:
-    """Idempotent delete — missing-key is treated as success."""
+    """Idempotent delete of the *current* version of `key`.
+
+    NOTE: On a versioned bucket (B2 buckets are versioned by default) this
+    only writes a delete marker — it does NOT purge prior versions. For
+    user-facing deletes and overwrite cleanup, use `delete_all_versions`
+    instead. This function is retained for unversioned contexts and
+    callers that specifically want marker-based deletion.
+    """
     client = get_client()
     try:
         client.delete_object(Bucket=settings.B2_BUCKET_NAME, Key=key)
@@ -51,6 +58,81 @@ def delete_object(key: str) -> None:
             return
         logger.exception("B2 delete failed: key=%s", key)
         raise StorageError(f"Delete failed: {exc}") from exc
+
+
+def delete_all_versions(key: str) -> int:
+    """Permanently remove every version *and* delete marker for `key`.
+
+    Returns the number of versioned objects purged (0 if the key had no
+    versions at all). Idempotent — calling on an already-clean key is a
+    no-op that returns 0.
+
+    Implementation details worth preserving:
+    - Paginates `list_object_versions` (pages cap at 1000 entries).
+    - Includes BOTH `Versions` and `DeleteMarkers` — leaving markers behind
+      is exactly the "hidden version" leak we're fixing.
+    - Filters results to `Key == key` exactly. `Prefix` alone would match
+      sibling keys such as `<key>.bak` or `<key>-foo`.
+    - Batches `delete_objects` at 1000 targets per call (S3 hard limit).
+    - `VersionId == "null"` is the literal sentinel for objects that were
+      written before versioning was enabled; it's passed through as-is.
+    - Per-object errors from `delete_objects` bubble up as StorageError so
+      the caller can decide to retry or surface a 502 to the user.
+
+    Required IAM/app-key permissions:
+    - `s3:ListBucketVersions` (B2 native: listBuckets/listFiles)
+    - `s3:DeleteObjectVersion` (B2 native: deleteFiles)
+    """
+    client = get_client()
+    bucket = settings.B2_BUCKET_NAME
+    purged = 0
+
+    try:
+        paginator = client.get_paginator("list_object_versions")
+        for page in paginator.paginate(Bucket=bucket, Prefix=key):
+            targets: list[dict[str, str]] = []
+            for entry in page.get("Versions", []) or []:
+                if entry.get("Key") == key:
+                    targets.append(
+                        {"Key": entry["Key"], "VersionId": entry["VersionId"]}
+                    )
+            for entry in page.get("DeleteMarkers", []) or []:
+                if entry.get("Key") == key:
+                    targets.append(
+                        {"Key": entry["Key"], "VersionId": entry["VersionId"]}
+                    )
+
+            # Chunk at 1000 to respect the S3 DeleteObjects cap. In practice
+            # one page yields ≤1000 so this rarely splits, but the loop is
+            # cheap and makes the invariant explicit.
+            for start in range(0, len(targets), 1000):
+                chunk = targets[start : start + 1000]
+                if not chunk:
+                    continue
+                resp = client.delete_objects(
+                    Bucket=bucket,
+                    Delete={"Objects": chunk, "Quiet": True},
+                )
+                errors = resp.get("Errors") or []
+                if errors:
+                    logger.error(
+                        "B2 delete_objects partial failure: key=%s errors=%s",
+                        key, errors,
+                    )
+                    raise StorageError(
+                        f"Failed to purge {len(errors)} version(s) of {key}: {errors[0]}"
+                    )
+                purged += len(chunk)
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        # NoSuchBucket is a config error, not transient — still raise.
+        if error_code in ("NoSuchKey", "404"):
+            return purged
+        logger.exception("B2 list/delete versions failed: key=%s", key)
+        raise StorageError(f"Version purge failed for {key}: {exc}") from exc
+
+    logger.info("B2 purge complete: key=%s versions_removed=%d", key, purged)
+    return purged
 
 
 Disposition = Literal["inline", "attachment"]

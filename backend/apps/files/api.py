@@ -19,7 +19,7 @@ from apps.accounts.auth import jwt_auth
 from apps.common.pagination import MAX_PAGE_SIZE, paginate_queryset
 from apps.storage.exceptions import StorageError
 
-from .exceptions import FileValidationError, QuotaExceededError
+from .exceptions import FileBusyError, FileValidationError, QuotaExceededError
 from .models import File
 from .schemas import (
     ErrorOut,
@@ -109,7 +109,14 @@ def get_file(request, file_id: UUID):
 
 
 # ── DELETE /api/files/{id} ──────────────────────────────────────
-@router.delete("/{file_id}", response={204: None, 404: ErrorOut}, auth=jwt_auth)
+# Synchronous contract: by the time we return 204, every B2 version and
+# delete marker for this key is gone. If the purge fails we return 502 so
+# the client can retry — we do NOT report success on half-completed work.
+@router.delete(
+    "/{file_id}",
+    response={204: None, 404: ErrorOut, 409: ErrorOut, 502: ErrorOut},
+    auth=jwt_auth,
+)
 def delete_file_endpoint(request, file_id: UUID):
     row = get_user_file(
         request.user,
@@ -123,7 +130,21 @@ def delete_file_endpoint(request, file_id: UUID):
     )
     if row is None:
         return 404, ErrorOut(code="NOT_FOUND", message="File not found.")
-    delete_file(request.user, row)
+    try:
+        delete_file(request.user, row)
+    except FileBusyError as exc:
+        return 409, ErrorOut(code=exc.code, message=exc.message)
+    except StorageError:
+        # Row has been flagged DELETING; the reap_deleting beat task will
+        # retry the purge. Surface a retryable error to the client.
+        logger.exception("delete_file: B2 purge failed id=%s", file_id)
+        return 502, ErrorOut(
+            code="STORAGE_PURGE_FAILED",
+            message=(
+                "Could not fully remove the file from storage. "
+                "The deletion will be retried automatically — please try again."
+            ),
+        )
     return 204, None
 
 
