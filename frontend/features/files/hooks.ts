@@ -107,4 +107,78 @@ export function useSignedUrl() {
   });
 }
 
+export type BulkDeleteResult = {
+  succeeded: string[];
+  failed: { id: string; name: string; error: string }[];
+};
+
+/**
+ * Sequentially calls DELETE /api/files/{id} for each selected file.
+ *
+ * Sequential — not parallel — because the server-side `delete_file` takes a
+ * row-level lock and synchronously purges every B2 version before returning.
+ * Parallelism would not only bunch up B2 rate-limited purge calls but also
+ * make the failure summary racier to reason about. With sequential loops,
+ * the failed list is in input order and the user can retry the leftovers.
+ *
+ * Partial-failure behavior: we never short-circuit. One bad file does not
+ * block the others. The caller gets a per-file summary and shows toasts
+ * accordingly.
+ *
+ * Invalidation happens once at the end so the grid doesn't re-render N
+ * times mid-batch. Selection clearing is the caller's responsibility.
+ */
+export function useBulkDelete() {
+  const qc = useQueryClient();
+  return useMutation<
+    BulkDeleteResult,
+    ApiError,
+    { files: { id: string; name: string }[] }
+  >({
+    mutationFn: async ({ files }) => {
+      const result: BulkDeleteResult = { succeeded: [], failed: [] };
+      for (const f of files) {
+        try {
+          await filesApi.remove(f.id);
+          result.succeeded.push(f.id);
+        } catch (err) {
+          let message = "Delete failed";
+          if (err instanceof ApiError) {
+            if (err.code === "FILE_BUSY") {
+              message = "Still uploading — try again shortly.";
+            } else if (err.code === "STORAGE_PURGE_FAILED") {
+              message = "Storage cleanup failed; will retry.";
+            } else {
+              message = err.message || "Delete failed";
+            }
+          } else if (err instanceof Error) {
+            message = err.message;
+          }
+          result.failed.push({ id: f.id, name: f.name, error: message });
+        }
+      }
+      return result;
+    },
+    onSettled: () => {
+      // Always refresh — even on partial failure at least some rows changed.
+      qc.invalidateQueries({ queryKey: filesKeys.all });
+      qc.invalidateQueries({ queryKey: filesKeys.storage() });
+    },
+    onSuccess: (result) => {
+      const ok = result.succeeded.length;
+      const bad = result.failed.length;
+      if (ok > 0 && bad === 0) {
+        toast.success(ok === 1 ? "File deleted" : `Deleted ${ok} files`);
+      } else if (ok > 0 && bad > 0) {
+        toast.warning(`Deleted ${ok}, ${bad} failed`);
+      } else if (bad > 0) {
+        // All failed — surface the first error so the reason is visible.
+        toast.error(
+          bad === 1 ? result.failed[0]!.error : `All ${bad} deletes failed`,
+        );
+      }
+    },
+  });
+}
+
 export type { UploadProgress };

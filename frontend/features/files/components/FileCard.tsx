@@ -1,5 +1,7 @@
 "use client";
 
+import { Checkbox, type CheckboxState } from "@/components/ui/checkbox";
+
 import type { FileItem } from "../types";
 import { formatBytes, formatDate } from "../utils";
 import { FileActions } from "./FileActions";
@@ -8,17 +10,35 @@ import { StatusBadge } from "./StatusBadge";
 
 export function FileCard({
   file,
+  selected,
+  onToggleSelect,
   onPreview,
   onDownload,
   onDelete,
 }: {
   file: FileItem;
+  selected: boolean;
+  onToggleSelect: (id: string) => void;
   onPreview: (file: FileItem) => void;
   onDownload: (file: FileItem) => void;
   onDelete: (file: FileItem) => void;
 }) {
+  const state: CheckboxState = selected ? "checked" : "unchecked";
   return (
-    <div className="group relative flex flex-col rounded-lg border border-neutral-200 bg-white p-4 transition-colors hover:bg-neutral-50">
+    <div
+      className={
+        "group relative flex flex-col rounded-lg border bg-white p-4 transition-colors hover:bg-neutral-50 " +
+        (selected ? "border-neutral-900/40 bg-neutral-50" : "border-neutral-200")
+      }
+    >
+      <div className="absolute left-2 top-2 z-10">
+        <Checkbox
+          state={state}
+          onToggle={() => onToggleSelect(file.id)}
+          stopPropagation
+          ariaLabel={`Select ${file.name}`}
+        />
+      </div>
       <div className="absolute right-2 top-2">
         <FileActions
           file={file}
