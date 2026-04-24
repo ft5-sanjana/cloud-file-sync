@@ -1,5 +1,5 @@
 /**
- * Files API client.
+ * Files & folders API client.
  *
  * Uses apiFetch for JSON endpoints and a dedicated XHR implementation for
  * uploads (so we can observe real upload progress — fetch() has no upload
@@ -11,6 +11,10 @@ import { useAuthStore } from "@/features/auth/store";
 import type {
   FileItem,
   FileListResponse,
+  FolderDeleteResult,
+  FolderDownloadUrlResponse,
+  FolderItem,
+  FolderListResponse,
   SignedUrlMode,
   SignedUrlResponse,
   StorageUsage,
@@ -19,6 +23,10 @@ import type {
 export type ListFilesParams = {
   page?: number;
   page_size?: number;
+  /** Search spans the whole tree regardless of folder scope. */
+  q?: string;
+  /** null / undefined → root. */
+  folder_id?: string | null;
 };
 
 export type UploadProgress = {
@@ -31,9 +39,17 @@ export type UploadProgress = {
 export type UploadOptions = {
   onProgress?: (p: UploadProgress) => void;
   signal?: AbortSignal;
+  /** Target folder id. `null`/`undefined` means upload to root. */
+  folderId?: string | null;
+  /**
+   * Relative directory path for folder uploads (from webkitRelativePath,
+   * minus the filename). The server materializes missing folders in
+   * this chain, nested under `folderId` if provided, otherwise at root.
+   */
+  relativePath?: string;
 };
 
-function buildQuery(params: Record<string, string | number | undefined>): string {
+function buildQuery(params: Record<string, string | number | undefined | null>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null || v === "") continue;
@@ -47,6 +63,8 @@ export const filesApi = {
     const qs = buildQuery({
       page: params.page ?? 1,
       page_size: params.page_size ?? 50,
+      q: params.q,
+      folder_id: params.folder_id ?? undefined,
     });
     return apiFetch<FileListResponse>(`/api/files${qs}`, { method: "GET" });
   },
@@ -75,9 +93,48 @@ export const filesApi = {
   },
 };
 
+export const foldersApi = {
+  list(parentId?: string | null): Promise<FolderListResponse> {
+    const qs = buildQuery({ parent_id: parentId ?? undefined });
+    return apiFetch<FolderListResponse>(`/api/folders${qs}`, { method: "GET" });
+  },
+
+  create(payload: { name: string; parent_id?: string | null }): Promise<FolderItem> {
+    // `apiFetch` handles JSON.stringify + Content-Type itself — pass the
+    // raw object. Passing a pre-stringified body would get re-stringified
+    // and arrive at the server as a JSON string (not an object), which
+    // Ninja rejects with 422 Unprocessable Entity.
+    return apiFetch<FolderItem>(`/api/folders`, {
+      method: "POST",
+      body: {
+        name: payload.name,
+        parent_id: payload.parent_id ?? null,
+      },
+    });
+  },
+
+  remove(id: string): Promise<FolderDeleteResult> {
+    return apiFetch<FolderDeleteResult>(`/api/folders/${id}`, {
+      method: "DELETE",
+    });
+  },
+
+  downloadUrl(id: string): Promise<FolderDownloadUrlResponse> {
+    return apiFetch<FolderDownloadUrlResponse>(
+      `/api/folders/${id}/download-url`,
+      { method: "GET" },
+    );
+  },
+};
+
 /**
  * XHR-based upload with progress events. On 401, calls requestRefresh() once
  * (coalesced with any concurrent refresh in flight) and retries.
+ *
+ * Folder placement: if `opts.folderId` is set, the file is placed in that
+ * folder. If `opts.relativePath` is set, the server creates any missing
+ * intermediate folders (under `folderId` if given, else at root) and
+ * places the file at the leaf. Both may be combined.
  */
 function uploadWithXHR(file: File, opts: UploadOptions): Promise<FileItem> {
   const send = (token: string | null): Promise<{ status: number; body: unknown; contentType: string }> =>
@@ -123,6 +180,12 @@ function uploadWithXHR(file: File, opts: UploadOptions): Promise<FileItem> {
 
       const form = new FormData();
       form.append("file", file, file.name);
+      if (opts.folderId) {
+        form.append("folder_id", opts.folderId);
+      }
+      if (opts.relativePath) {
+        form.append("relative_path", opts.relativePath);
+      }
       xhr.send(form);
     });
 

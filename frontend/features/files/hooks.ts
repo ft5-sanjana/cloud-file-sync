@@ -13,10 +13,20 @@ import {
 import { toast } from "sonner";
 
 import { ApiError } from "@/lib/api";
-import { filesApi, type UploadOptions, type UploadProgress, type ListFilesParams } from "./api";
+import {
+  filesApi,
+  foldersApi,
+  type ListFilesParams,
+  type UploadOptions,
+  type UploadProgress,
+} from "./api";
 import type {
   FileItem,
   FileListResponse,
+  FolderDeleteResult,
+  FolderDownloadUrlResponse,
+  FolderItem,
+  FolderListResponse,
   SignedUrlMode,
   SignedUrlResponse,
   StorageUsage,
@@ -27,6 +37,12 @@ export const filesKeys = {
   list: (params: ListFilesParams = {}) => [...filesKeys.all, "list", params] as const,
   detail: (id: string) => [...filesKeys.all, "detail", id] as const,
   storage: () => ["storage", "usage"] as const,
+};
+
+export const foldersKeys = {
+  all: ["folders"] as const,
+  list: (parentId: string | null = null) =>
+    [...foldersKeys.all, "list", parentId ?? "root"] as const,
 };
 
 export function useFiles(
@@ -54,16 +70,21 @@ export type UploadArgs = {
   file: File;
   onProgress?: UploadOptions["onProgress"];
   signal?: AbortSignal;
+  /** Target folder id. Omit/undefined for root. */
+  folderId?: string | null;
+  /** Directory part of the relative path (folder upload). */
+  relativePath?: string;
 };
 
 export function useUploadFile() {
   const qc = useQueryClient();
   return useMutation<FileItem, ApiError, UploadArgs>({
-    mutationFn: ({ file, onProgress, signal }) =>
-      filesApi.upload(file, { onProgress, signal }),
+    mutationFn: ({ file, onProgress, signal, folderId, relativePath }) =>
+      filesApi.upload(file, { onProgress, signal, folderId, relativePath }),
     onSuccess: (item) => {
       toast.success(`Uploaded ${item.name}`);
       qc.invalidateQueries({ queryKey: filesKeys.all });
+      qc.invalidateQueries({ queryKey: foldersKeys.all });
       qc.invalidateQueries({ queryKey: filesKeys.storage() });
     },
     onError: (err) => {
@@ -176,6 +197,104 @@ export function useBulkDelete() {
         toast.error(
           bad === 1 ? result.failed[0]!.error : `All ${bad} deletes failed`,
         );
+      }
+    },
+  });
+}
+
+// ── Folders ──────────────────────────────────────────────────────
+
+export function useFolders(
+  parentId: string | null = null,
+  options?: Omit<UseQueryOptions<FolderListResponse, ApiError>, "queryKey" | "queryFn">,
+) {
+  return useQuery<FolderListResponse, ApiError>({
+    queryKey: foldersKeys.list(parentId),
+    queryFn: () => foldersApi.list(parentId),
+    ...options,
+  });
+}
+
+export function useCreateFolder() {
+  const qc = useQueryClient();
+  return useMutation<
+    FolderItem,
+    ApiError,
+    { name: string; parent_id?: string | null }
+  >({
+    mutationFn: (payload) => foldersApi.create(payload),
+    onSuccess: (folder) => {
+      toast.success(`Created folder "${folder.name}"`);
+      // Invalidate the whole folder tree — counts on ancestors may have
+      // shifted. File list is unaffected, so don't evict those caches.
+      qc.invalidateQueries({ queryKey: foldersKeys.all });
+    },
+    onError: (err) => {
+      if (err.code === "FOLDER_CONFLICT") {
+        toast.error("A folder with this name already exists here.");
+      } else if (err.code === "FOLDER_NAME_INVALID") {
+        toast.error(err.message);
+      } else {
+        toast.error(err.message || "Could not create folder");
+      }
+    },
+  });
+}
+
+export function useDeleteFolder() {
+  const qc = useQueryClient();
+  return useMutation<
+    FolderDeleteResult,
+    ApiError,
+    { id: string; name: string }
+  >({
+    mutationFn: ({ id }) => foldersApi.remove(id),
+    onSuccess: (result, vars) => {
+      const files = result.files_deleted;
+      const folders = result.folders_deleted;
+      toast.success(
+        `Deleted "${vars.name}"` +
+          (files > 0 ? ` (${files} file${files === 1 ? "" : "s"})` : "") +
+          (folders > 1 ? ` and ${folders - 1} subfolder${folders - 1 === 1 ? "" : "s"}` : ""),
+      );
+      // The delete cascaded — refresh both files and folders.
+      qc.invalidateQueries({ queryKey: foldersKeys.all });
+      qc.invalidateQueries({ queryKey: filesKeys.all });
+      qc.invalidateQueries({ queryKey: filesKeys.storage() });
+    },
+    onError: (err) => {
+      if (err.code === "FOLDER_TOO_LARGE") {
+        toast.error(err.message);
+      } else if (err.code === "FILE_BUSY") {
+        toast.error("A file in this folder is still uploading — try again shortly.");
+      } else if (err.code === "STORAGE_PURGE_FAILED") {
+        toast.error(
+          "Storage cleanup failed partway through — please retry. Already-removed files won't be touched.",
+        );
+        // Partial progress — still invalidate so UI reflects what *did* go.
+        qc.invalidateQueries({ queryKey: foldersKeys.all });
+        qc.invalidateQueries({ queryKey: filesKeys.all });
+        qc.invalidateQueries({ queryKey: filesKeys.storage() });
+      } else {
+        toast.error(err.message || "Could not delete folder");
+      }
+    },
+  });
+}
+
+/**
+ * Fetch a one-shot signed URL for downloading a folder as ZIP. Returns
+ * the URL synchronously — the caller triggers navigation (usually via
+ * a transient <a download> click) to start the stream.
+ */
+export function useFolderDownloadUrl() {
+  return useMutation<FolderDownloadUrlResponse, ApiError, { id: string; name: string }>({
+    mutationFn: ({ id }) => foldersApi.downloadUrl(id),
+    onError: (err) => {
+      if (err.code === "FOLDER_TOO_LARGE") {
+        toast.error(err.message);
+      } else {
+        toast.error(err.message || "Could not prepare download");
       }
     },
   });

@@ -135,6 +135,25 @@ def delete_all_versions(key: str) -> int:
     return purged
 
 
+def download_to_stream(key: str, target: IO[bytes]) -> None:
+    """Stream the object at `key` into `target` (a writable binary stream).
+
+    Used by the folder ZIP builder — it appends each file's bytes to a
+    zipfile write-through stream. Uses boto3's `download_fileobj`, which
+    chunks the transfer and never holds the full object in memory.
+
+    Raises StorageError on any transport or S3-side failure. NoSuchKey is
+    *not* swallowed here: missing bytes mid-zip is a data-integrity event
+    the caller needs to know about.
+    """
+    client = get_client()
+    try:
+        client.download_fileobj(settings.B2_BUCKET_NAME, key, target)
+    except ClientError as exc:
+        logger.exception("B2 download failed: key=%s", key)
+        raise StorageError(f"Download failed for {key}: {exc}") from exc
+
+
 Disposition = Literal["inline", "attachment"]
 
 

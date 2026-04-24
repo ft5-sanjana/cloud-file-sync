@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Multi-file uploader.
+ * Multi-file & folder uploader.
  *
  * The backend endpoint is per-file (POST /api/files accepts a single
  * UploadedFile), so a "batch upload" here means one HTTP request per file,
@@ -9,9 +9,17 @@
  *   1. Two files in the same batch that share a name would race through the
  *      upload_file Phase 5 purge; sequential keeps last-write-wins
  *      deterministic (the later file wins, as the picker ordered them).
- *   2. The per-user 30/h upload rate limit is easier to reason about when
+ *   2. The per-user upload rate limit is easier to reason about when
  *      requests go out one at a time.
  *   3. Per-file progress % stays meaningful — users see one bar moving.
+ *
+ * Folder uploads: browsers expose a `webkitRelativePath` on File objects
+ * picked via a `webkitdirectory`-flagged input. We strip the filename and
+ * send the remaining directory chain as `relative_path`; the server calls
+ * `ensure_folder_path` to lazily materialize any missing segments under
+ * the target parent. Cross-browser note: `webkitdirectory` is non-standard
+ * but is implemented in Chromium, Safari, and Firefox — the three browsers
+ * this app targets.
  *
  * UI modes, by batch size:
  *   - 1 file  → minimal inline progress bar under the button + toast.
@@ -34,16 +42,31 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Upload, CheckCircle2, AlertCircle, Loader2, X } from "lucide-react";
+import {
+  Upload,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  X,
+  FolderUp,
+  FileUp,
+  ChevronDown,
+} from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
 import { ApiError } from "@/lib/api";
 
 import { filesApi } from "../api";
-import { filesKeys } from "../hooks";
+import { filesKeys, foldersKeys } from "../hooks";
 import { ALLOWED_EXTENSIONS, MAX_FILE_SIZE_BYTES } from "../types";
 import { formatBytes } from "../utils";
 
@@ -56,6 +79,10 @@ type BatchItem = {
   /** Stable local id for React keys; does not round-trip to the server. */
   localId: string;
   file: File;
+  /** Directory portion of webkitRelativePath, "" for flat uploads. */
+  relativeDir: string;
+  /** Display name with any folder prefix ("contracts/2024/a.pdf"). */
+  displayPath: string;
   status: ItemStatus;
   /** 0–100, meaningful only while status === "uploading" or "success". */
   progress: number;
@@ -90,8 +117,30 @@ function isTerminal(s: ItemStatus): boolean {
   return s === "success" || s === "failed";
 }
 
-export function UploadButton() {
-  const inputRef = useRef<HTMLInputElement>(null);
+/** Split webkitRelativePath into (directoryPath, filename). The leading
+ *  component is always the folder the user picked, which we keep — it
+ *  becomes the top of the uploaded hierarchy. */
+function splitRelativePath(file: File): { relativeDir: string; displayPath: string } {
+  // File.webkitRelativePath is "" for files picked without webkitdirectory.
+  const raw = (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
+  if (!raw) {
+    return { relativeDir: "", displayPath: file.name };
+  }
+  const lastSlash = raw.lastIndexOf("/");
+  if (lastSlash <= 0) {
+    return { relativeDir: "", displayPath: raw };
+  }
+  return { relativeDir: raw.slice(0, lastSlash), displayPath: raw };
+}
+
+export function UploadButton({
+  folderId = null,
+}: {
+  /** Target folder id for uploads. Null/undefined = root. */
+  folderId?: string | null;
+}) {
+  const filesInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
   const [items, setItems] = useState<BatchItem[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -125,7 +174,8 @@ export function UploadButton() {
     };
   }, [items, isUploading]);
 
-  const handlePick = () => inputRef.current?.click();
+  const handlePickFiles = () => filesInputRef.current?.click();
+  const handlePickFolder = () => folderInputRef.current?.click();
 
   const updateItem = (localId: string, patch: Partial<BatchItem>) => {
     setItems((prev) =>
@@ -139,9 +189,12 @@ export function UploadButton() {
     // wondering why we silently dropped their selection.
     const batch: BatchItem[] = picked.map((file) => {
       const err = clientValidate(file);
+      const { relativeDir, displayPath } = splitRelativePath(file);
       return {
         localId: makeLocalId(),
         file,
+        relativeDir,
+        displayPath,
         status: err ? "failed" : "pending",
         progress: 0,
         error: err ?? undefined,
@@ -167,12 +220,14 @@ export function UploadButton() {
         updateItem(item.localId, { status: "uploading", progress: 0 });
         try {
           await filesApi.upload(item.file, {
+            folderId,
+            relativePath: item.relativeDir || undefined,
             onProgress: (p) =>
               updateItem(item.localId, { progress: p.percent }),
           });
           updateItem(item.localId, { status: "success", progress: 100 });
           successCount += 1;
-          lastSuccessName = item.file.name;
+          lastSuccessName = item.displayPath;
         } catch (err) {
           const message =
             err instanceof ApiError
@@ -188,12 +243,16 @@ export function UploadButton() {
     } finally {
       setIsUploading(false);
       // One invalidation at the end of the batch — not per file — so the
-      // grid doesn't re-render N times mid-upload.
+      // grid doesn't re-render N times mid-upload. Folder uploads may
+      // have created new folders via ensure_folder_path, so invalidate
+      // the folder tree as well.
       if (successCount > 0) {
         qc.invalidateQueries({ queryKey: filesKeys.all });
+        qc.invalidateQueries({ queryKey: foldersKeys.all });
         qc.invalidateQueries({ queryKey: filesKeys.storage() });
       }
-      if (inputRef.current) inputRef.current.value = "";
+      if (filesInputRef.current) filesInputRef.current.value = "";
+      if (folderInputRef.current) folderInputRef.current.value = "";
 
       // Single-file flow: no panel, so clear the inline row immediately.
       // Toast below carries the result. Multi-file batches stay on screen
@@ -240,18 +299,49 @@ export function UploadButton() {
 
   return (
     <div className="flex w-full max-w-md flex-col items-end gap-2">
-      <Button onClick={handlePick} disabled={isUploading}>
-        <Upload className="mr-2 h-4 w-4" />
-        {isUploading ? "Uploading…" : "Upload files"}
-      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button disabled={isUploading}>
+            <Upload className="mr-2 h-4 w-4" />
+            {isUploading ? "Uploading…" : "Upload"}
+            <ChevronDown className="ml-2 h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={handlePickFiles}>
+            <FileUp className="h-4 w-4" />
+            Upload files
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={handlePickFolder}>
+            <FolderUp className="h-4 w-4" />
+            Upload folder
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
       <input
-        ref={inputRef}
+        ref={filesInputRef}
         type="file"
         accept={ACCEPT}
         multiple
         onChange={onChange}
         className="hidden"
         aria-hidden
+      />
+      {/*
+        `webkitdirectory` is not in the standard React TS defs; cast on
+        the spread to keep TS happy. The attribute is supported by all
+        Chromium browsers, Safari, and Firefox. `directory` is the legacy
+        attribute that Firefox historically recognized — harmless on others.
+      */}
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        onChange={onChange}
+        className="hidden"
+        aria-hidden
+        {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
       />
 
       {isSingleInFlight ? <SingleInlineProgress item={items[0]!} /> : null}
@@ -288,8 +378,8 @@ function SingleInlineProgress({ item }: { item: BatchItem }) {
   return (
     <div className="w-56 space-y-1">
       <div className="flex justify-between text-xs text-neutral-600">
-        <span className="truncate" title={item.file.name}>
-          {item.file.name}
+        <span className="truncate" title={item.displayPath}>
+          {item.displayPath}
         </span>
         <span className="tabular-nums">{item.progress}%</span>
       </div>
@@ -304,8 +394,11 @@ function BatchItemRow({ item }: { item: BatchItem }) {
       <div className="flex items-center justify-between gap-2 text-xs">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <StatusIcon status={item.status} />
-          <span className="truncate text-neutral-800" title={item.file.name}>
-            {item.file.name}
+          <span
+            className="truncate text-neutral-800"
+            title={item.displayPath}
+          >
+            {item.displayPath}
           </span>
           <span className="shrink-0 text-neutral-500">
             {formatBytes(item.file.size)}

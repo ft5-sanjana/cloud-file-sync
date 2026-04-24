@@ -20,13 +20,19 @@ from django.conf import settings
 
 from .exceptions import (
     FileTooLargeError,
+    FolderNameInvalidError,
     MimeMismatchError,
     UnsupportedFileTypeError,
 )
 
 # ── Extension allowlist ──────────────────────────────────────────
 ALLOWED_EXTENSIONS: frozenset[str] = frozenset(
-    {"doc", "docx", "pdf", "xls", "xlsx", "ppt", "pptx", "png", "jpeg", "jpg", "svg", "txt"}
+    {
+        "doc", "docx", "pdf", "xls", "xlsx", "ppt", "pptx",
+        "png", "jpeg", "jpg", "svg", "txt",
+        # ODT (OpenDocument Text) and generic ZIP archives.
+        "odt", "zip",
+    }
 )
 
 # Per-extension allowed sniffed MIMEs. Entries are deliberately permissive
@@ -70,6 +76,23 @@ EXT_MIME_MAP: dict[str, set[str]] = {
         "text/html",  # libmagic sometimes labels SVG as HTML
     },
     "txt": {"text/plain", "application/octet-stream"},
+    # ODT files are ZIP containers — libmagic typically reports the
+    # OpenDocument MIME when the archive's `mimetype` entry is first,
+    # but falls back to plain `application/zip` when it isn't (same
+    # quirk as docx/xlsx/pptx above).
+    "odt": {
+        "application/vnd.oasis.opendocument.text",
+        "application/zip",
+        "application/octet-stream",
+    },
+    # Generic ZIP. `application/x-zip-compressed` is the legacy
+    # Windows/IIS label — accept it so clients don't get rejected based
+    # on which toolchain produced the archive.
+    "zip": {
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/octet-stream",
+    },
 }
 
 # Canonical MIME we STORE for each extension (what we return in responses and
@@ -87,6 +110,8 @@ CANONICAL_MIME: dict[str, str] = {
     "jpg": "image/jpeg",
     "svg": "image/svg+xml",
     "txt": "text/plain",
+    "odt": "application/vnd.oasis.opendocument.text",
+    "zip": "application/zip",
 }
 
 
@@ -161,6 +186,113 @@ _SVG_ALLOWED_ATTRS = {
     "svg": ["xmlns", "xmlns:xlink", "version", "viewBox", "width", "height"],
     "use": ["href", "xlink:href"],
 }
+
+
+# ── Folder name / relative path validation ──────────────────────
+# A folder name is displayed in the UI and becomes a segment of the
+# materialized path AND a segment of every child file's storage_key. A
+# bad name (slashes, control bytes, dots-only) would forge a prefix or
+# escape the user's object-store namespace, so we're strict here.
+
+# Reserved on Windows; we forbid them defensively even though our
+# primary targets are Linux/macOS. Case-insensitive.
+_WINDOWS_RESERVED_NAMES: frozenset[str] = frozenset({
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+})
+
+# Hard cap on folder depth — stops pathological uploads with a
+# thousand nested directories and keeps materialized paths within the
+# 1024-char column budget.
+MAX_FOLDER_DEPTH = 32
+
+# Single-segment length cap. Leaves comfortable headroom for the
+# 1024-char `path` column and the 512-char `storage_key` column.
+MAX_FOLDER_NAME_LENGTH = 255
+
+
+def validate_folder_name(name: str) -> str:
+    """Validate and canonicalize a single folder-name segment.
+
+    Rejects empty, whitespace-only, names containing path separators,
+    null bytes, control characters, trailing dots/spaces (Windows
+    pitfall), or reserved device names. Returns the stripped name —
+    callers should use the return value, not the original input.
+    """
+    if not isinstance(name, str):
+        raise FolderNameInvalidError("Folder name must be a string.")
+
+    stripped = name.strip()
+    if not stripped:
+        raise FolderNameInvalidError("Folder name cannot be empty.")
+    if len(stripped) > MAX_FOLDER_NAME_LENGTH:
+        raise FolderNameInvalidError(
+            f"Folder name cannot exceed {MAX_FOLDER_NAME_LENGTH} characters."
+        )
+
+    # Any separator-looking byte is a hierarchy-forging attempt — the
+    # caller is responsible for splitting `a/b/c` into segments before
+    # calling this function.
+    for bad in ("/", "\\", "\x00"):
+        if bad in stripped:
+            raise FolderNameInvalidError(
+                "Folder name cannot contain path separators or null bytes."
+            )
+
+    # Control characters (tabs, newlines, DEL, etc). Quietly reject — no
+    # legitimate folder name needs them and they break our audit logging.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in stripped):
+        raise FolderNameInvalidError(
+            "Folder name cannot contain control characters."
+        )
+
+    # `.` and `..` resolve to parent/current-dir when composed into
+    # paths — always reject, regardless of where they appear.
+    if stripped in {".", ".."}:
+        raise FolderNameInvalidError("Folder name cannot be '.' or '..'.")
+
+    # Windows strips trailing spaces and dots silently. Ban both
+    # outright so a name that lists fine from an API doesn't become a
+    # different name when extracted on Windows.
+    if stripped.endswith(".") or stripped.endswith(" "):
+        raise FolderNameInvalidError(
+            "Folder name cannot end with a dot or space."
+        )
+
+    if stripped.lower() in _WINDOWS_RESERVED_NAMES:
+        raise FolderNameInvalidError(
+            f"'{stripped}' is a reserved name and cannot be used."
+        )
+
+    return stripped
+
+
+def validate_relative_folder_path(relative_path: str) -> list[str]:
+    """Validate a relative path (a/b/c) and return the segment list.
+
+    Accepts forward slash separators only — the browser gives us
+    `webkitRelativePath` which uses `/` even on Windows. Leading and
+    trailing slashes are stripped. Each segment is validated as a
+    folder name. An empty path after stripping means "root" (empty
+    list), which callers may accept or reject depending on context.
+    """
+    if not isinstance(relative_path, str):
+        raise FolderNameInvalidError("Folder path must be a string.")
+
+    # Normalize: collapse backslashes to forward slashes so Windows-born
+    # paths work, then strip leading/trailing separators.
+    normalized = relative_path.replace("\\", "/").strip().strip("/")
+    if not normalized:
+        return []
+
+    segments = normalized.split("/")
+    if len(segments) > MAX_FOLDER_DEPTH:
+        raise FolderNameInvalidError(
+            f"Folder path exceeds maximum depth of {MAX_FOLDER_DEPTH}."
+        )
+
+    return [validate_folder_name(s) for s in segments]
 
 
 def sanitize_svg(content: bytes) -> bytes:

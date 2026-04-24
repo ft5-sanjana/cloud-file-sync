@@ -7,8 +7,39 @@ export type FileItem = {
   mime_type: string;
   extension: string;
   status: FileStatus;
+  /** Parent folder id, or null if the file sits at the root. */
+  folder_id: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type FolderItem = {
+  id: string;
+  name: string;
+  /** Materialized path including the folder's own name (no leading slash). */
+  path: string;
+  parent_id: string | null;
+  /** Direct file/subfolder counts — one level, not subtree totals. */
+  file_count: number;
+  subfolder_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FolderListResponse = {
+  items: FolderItem[];
+};
+
+export type FolderDeleteResult = {
+  folders_deleted: number;
+  files_deleted: number;
+  versions_purged: number;
+};
+
+export type FolderDownloadUrlResponse = {
+  url: string;
+  expires_at: string;
+  filename: string;
 };
 
 export type FileListResponse = {
@@ -36,6 +67,7 @@ export type StorageUsage = {
 export const ALLOWED_EXTENSIONS = [
   "doc", "docx", "pdf", "xls", "xlsx", "ppt", "pptx",
   "png", "jpeg", "jpg", "svg", "txt",
+  "odt", "zip",
 ] as const;
 
 /** Keep in sync with MAX_FILE_SIZE_BYTES on the backend (default 100MB). */
